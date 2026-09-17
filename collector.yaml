@@ -1,0 +1,285 @@
+# Runtime config for otelcol-streams-fanout (see README.md).
+#
+# Cluster OTLP / Prometheus / K8s → Elastic + Splunk O11y + Datadog.
+# Optional Vector → ClickHouse (commented; original Iceberg path).
+#
+# Required env:
+#   ELASTIC_OTLP_ENDPOINT   https://xxxx.ingest....elastic.cloud:443
+#   ELASTIC_API_KEY
+#   SPLUNK_REALM            us0 | us1 | eu0 | ...
+#   SPLUNK_ACCESS_TOKEN
+#   DD_API_KEY
+#   DD_SITE                 datadoghq.com | datadoghq.eu | ...
+#   K8S_CLUSTER_NAME
+# Optional:
+#   OTEL_K8S_NODE_NAME      kubeletstats (DaemonSet)
+#   MY_POD_IP               health_check bind (local: 0.0.0.0)
+#   DEPLOYMENT_ENVIRONMENT  default prod
+#   VECTOR_OTLP_ENDPOINT    enable metrics/vector + logs→vector
+#   CLICKHOUSE_ENDPOINT     enable traces/clickhouse
+#   KAFKA_BROKERS           enable logs/kafka
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+  # Prometheus + Portworx + app /metrics (Rancher cluster scrape).
+  prometheus:
+    config:
+      scrape_configs:
+        - job_name: kubernetes-pods
+          scrape_interval: 30s
+          kubernetes_sd_configs:
+            - role: pod
+          relabel_configs:
+            - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+              action: keep
+              regex: "true"
+            - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+              action: replace
+              target_label: __metrics_path__
+              regex: (.+)
+            - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+              action: replace
+              regex: ([^:]+)(?::\d+)?;(\d+)
+              replacement: $1:$2
+              target_label: __address__
+
+        - job_name: kubernetes-apiservers
+          scrape_interval: 30s
+          kubernetes_sd_configs:
+            - role: endpoints
+          scheme: https
+          tls_config:
+            ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+            insecure_skip_verify: false
+          bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+          relabel_configs:
+            - source_labels:
+                [__meta_kubernetes_namespace, __meta_kubernetes_service_name, __meta_kubernetes_endpoint_port_name]
+              action: keep
+              regex: default;kubernetes;https
+
+        - job_name: portworx
+          scrape_interval: 30s
+          kubernetes_sd_configs:
+            - role: service
+          relabel_configs:
+            - source_labels: [__meta_kubernetes_service_name]
+              action: keep
+              regex: "(portworx-api|px-api|portworx-service|portworx)"
+            - source_labels: [__meta_kubernetes_service_port_number]
+              action: keep
+              regex: "9001|9020|9090"
+
+  kubeletstats:
+    auth_type: serviceAccount
+    collection_interval: 30s
+    endpoint: ${env:OTEL_K8S_NODE_NAME}:10250
+    node: ${env:OTEL_K8S_NODE_NAME}
+    insecure_skip_verify: true
+    k8s_api_config:
+      auth_type: serviceAccount
+    metric_groups: [node, pod, container, volume]
+    extra_metadata_labels: [container.id]
+
+  # Rancher / kube-apiserver cluster state (Deployment + leader election in production).
+  k8s_cluster:
+    collection_interval: 60s
+    auth_type: serviceAccount
+    node_conditions_to_report: [Ready, MemoryPressure, DiskPressure, PIDPressure]
+    allocatable_types_to_report: [cpu, memory]
+    metrics:
+      k8s.pod.status_reason:
+        enabled: true
+
+  k8s_events: {}
+
+  filelog:
+    include: ["/var/log/containers/*.log"]
+    exclude: ["/var/log/containers/*otelcol*.log"]
+    start_at: end
+    include_file_name: false
+    poll_interval: 10s
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 512
+    spike_limit_mib: 128
+
+  batch:
+    send_batch_size: 1024
+    timeout: 200ms
+
+  batch/metrics:
+    send_batch_max_size: 0
+    timeout: 1s
+
+  k8sattributes:
+    passthrough: false
+    extract:
+      metadata:
+        - k8s.namespace.name
+        - k8s.deployment.name
+        - k8s.replicaset.name
+        - k8s.statefulset.name
+        - k8s.daemonset.name
+        - k8s.node.name
+        - k8s.pod.name
+        - k8s.pod.uid
+        - k8s.container.name
+        - service.name
+
+  resourcedetection/system:
+    detectors: [env, system]
+    timeout: 2s
+    override: false
+
+  resource/cluster:
+    attributes:
+      - key: k8s.cluster.name
+        value: ${env:K8S_CLUSTER_NAME}
+        action: upsert
+      - key: deployment.environment
+        value: ${env:DEPLOYMENT_ENVIRONMENT}
+        action: upsert
+
+  # SignalFx / Splunk O11y still prices cardinality. Elastic Streams 9.5 does not.
+  # Keep full series on the Elastic + Vector pipelines; drop debug scrapes toward Splunk.
+  filter/splunk_cardinality:
+    metrics:
+      exclude:
+        match_type: regexp
+        metric_names:
+          - ".*debug.*"
+          - ".*pprof.*"
+          - "go_memstats_.*"
+
+  transform/elastic_streams:
+    metric_statements:
+      - context: resource
+        statements:
+          - set(attributes["elasticsearch.index"], "metrics")
+    log_statements:
+      - context: resource
+        statements:
+          - set(attributes["elasticsearch.index"], "logs")
+
+  filter/drop_dd_internal:
+    metrics:
+      exclude:
+        match_type: regexp
+        metric_names:
+          - "^dd\\.internal\\..*"
+
+connectors:
+  datadog/connector: {}
+
+exporters:
+  otlphttp/elastic:
+    endpoint: ${env:ELASTIC_OTLP_ENDPOINT}
+    headers:
+      Authorization: "ApiKey ${env:ELASTIC_API_KEY}"
+    compression: gzip
+    timeout: 15s
+    retry_on_failure:
+      enabled: true
+      initial_interval: 1s
+      max_interval: 30s
+      max_elapsed_time: 300s
+    sending_queue:
+      enabled: true
+      num_consumers: 4
+      queue_size: 5000
+
+  # Splunk Observability Cloud OTLP ingest (SignalFx).
+  otlphttp/splunk:
+    metrics_endpoint: https://ingest.${env:SPLUNK_REALM}.signalfx.com/v2/datapoint/otlp
+    traces_endpoint: https://ingest.${env:SPLUNK_REALM}.signalfx.com/v2/trace/otlp
+    compression: gzip
+    headers:
+      X-SF-Token: ${env:SPLUNK_ACCESS_TOKEN}
+    retry_on_failure:
+      enabled: true
+    sending_queue:
+      enabled: true
+      num_consumers: 2
+      queue_size: 5000
+
+  datadog:
+    api:
+      key: ${env:DD_API_KEY}
+      site: ${env:DD_SITE}
+    traces:
+      trace_buffer: 500
+    sending_queue:
+      enabled: true
+      num_consumers: 2
+      queue_size: 5000
+    retry_on_failure:
+      enabled: true
+
+  debug:
+    verbosity: basic
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+  pprof: {}
+  zpages: {}
+
+service:
+  extensions: [health_check, pprof, zpages]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, k8sattributes, resourcedetection/system, resource/cluster, batch]
+      exporters: [otlphttp/elastic, otlphttp/splunk, datadog, datadog/connector]
+
+    # Full-fidelity metrics → Elastic Streams (downsample / dedup / no high-card penalty on 9.5+).
+    metrics/elastic:
+      receivers: [otlp, prometheus, kubeletstats, k8s_cluster]
+      processors:
+        [memory_limiter, k8sattributes, resourcedetection/system, resource/cluster, transform/elastic_streams, batch/metrics]
+      exporters: [otlphttp/elastic]
+
+    # Dual-run to Splunk O11y dashboards / alerts / MCP. Cardinality-filtered.
+    metrics/splunk:
+      receivers: [otlp, prometheus, kubeletstats, k8s_cluster]
+      processors:
+        [memory_limiter, k8sattributes, resource/cluster, filter/splunk_cardinality, batch/metrics]
+      exporters: [otlphttp/splunk]
+
+    # Datadog metrics + APM stats derived from traces (datadog/connector).
+    metrics/datadog:
+      receivers: [otlp, prometheus, kubeletstats, k8s_cluster, datadog/connector]
+      processors:
+        [memory_limiter, k8sattributes, resource/cluster, filter/drop_dd_internal, batch/metrics]
+      exporters: [datadog]
+
+    logs:
+      receivers: [otlp, filelog, k8s_events]
+      processors:
+        [memory_limiter, k8sattributes, resourcedetection/system, resource/cluster, transform/elastic_streams, batch]
+      exporters: [otlphttp/elastic, datadog]
+
+    # metrics/vector:
+    #   receivers: [otlp, prometheus, kubeletstats]
+    #   processors: [memory_limiter, k8sattributes, resource/cluster, batch/metrics]
+    #   exporters: [otlphttp/vector]
+
+    # Optional Kafka → Elastic. Prefer Fluentd/Vector direct to Elastic if Kafka is log-only.
+    # logs/kafka:
+    #   receivers: [kafka]
+    #   processors: [memory_limiter, resource/cluster, transform/elastic_streams, batch]
+    #   exporters: [otlphttp/elastic]
+
+    # traces/clickhouse:
+    #   receivers: [otlp]
+    #   processors: [memory_limiter, k8sattributes, resource/cluster, batch]
+    #   exporters: [clickhouse]

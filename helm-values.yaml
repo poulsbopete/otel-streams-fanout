@@ -1,0 +1,247 @@
+# Helm values overlay for open-telemetry/opentelemetry-collector (or demo chart collector).
+# Same pipelines as collector.yaml. Bind secrets; do not commit keys.
+#
+#   kubectl create secret generic otel-fanout -n observability \
+#     --from-literal=elastic_otlp_endpoint='https://xxxx.ingest.elastic.cloud:443' \
+#     --from-literal=elastic_api_key='...' \
+#     --from-literal=splunk_realm='us1' \
+#     --from-literal=splunk_access_token='...' \
+#     --from-literal=dd_api_key='...' \
+#     --from-literal=dd_site='datadoghq.com'
+#
+#   helm upgrade --install otel-fanout open-telemetry/opentelemetry-collector \
+#     --values helm-values.yaml
+
+mode: daemonset
+
+image:
+  repository: otel/opentelemetry-collector-contrib
+  tag: "0.161.0"
+
+extraEnvs:
+  - name: ELASTIC_OTLP_ENDPOINT
+    valueFrom:
+      secretKeyRef:
+        name: otel-fanout
+        key: elastic_otlp_endpoint
+  - name: ELASTIC_API_KEY
+    valueFrom:
+      secretKeyRef:
+        name: otel-fanout
+        key: elastic_api_key
+  - name: SPLUNK_REALM
+    valueFrom:
+      secretKeyRef:
+        name: otel-fanout
+        key: splunk_realm
+  - name: SPLUNK_ACCESS_TOKEN
+    valueFrom:
+      secretKeyRef:
+        name: otel-fanout
+        key: splunk_access_token
+  - name: VECTOR_OTLP_ENDPOINT
+    valueFrom:
+      secretKeyRef:
+        name: otel-fanout
+        key: vector_otlp_endpoint
+        optional: true
+  - name: DD_API_KEY
+    valueFrom:
+      secretKeyRef:
+        name: otel-fanout
+        key: dd_api_key
+  - name: DD_SITE
+    valueFrom:
+      secretKeyRef:
+        name: otel-fanout
+        key: dd_site
+  - name: K8S_CLUSTER_NAME
+    value: rancher-prod
+  - name: OTEL_K8S_NODE_NAME
+    valueFrom:
+      fieldRef:
+        fieldPath: spec.nodeName
+  - name: MY_POD_IP
+    valueFrom:
+      fieldRef:
+        fieldPath: status.podIP
+  - name: DEPLOYMENT_ENVIRONMENT
+    value: prod
+  - name: K8S_NODE_NAME
+    valueFrom:
+      fieldRef:
+        fieldPath: spec.nodeName
+
+clusterRole:
+  rules:
+    - apiGroups: [""]
+      resources: [nodes, nodes/stats, nodes/proxy, nodes/metrics, pods, services, endpoints, namespaces, events, persistentvolumes, persistentvolumeclaims]
+      verbs: [get, list, watch]
+    - apiGroups: [apps]
+      resources: [replicasets, deployments, daemonsets, statefulsets]
+      verbs: [get, list, watch]
+    - apiGroups: [""]
+      resources: [configmaps]
+      verbs: [get]
+
+extraVolumes:
+  - name: varlog
+    hostPath:
+      path: /var/log
+      type: Directory
+
+extraVolumeMounts:
+  - name: varlog
+    mountPath: /var/log
+    readOnly: true
+
+config:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+    prometheus:
+      config:
+        scrape_configs:
+          - job_name: kubernetes-pods
+            scrape_interval: 30s
+            kubernetes_sd_configs:
+              - role: pod
+            relabel_configs:
+              - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+                action: keep
+                regex: "true"
+          - job_name: kubernetes-apiservers
+            scrape_interval: 30s
+            kubernetes_sd_configs:
+              - role: endpoints
+            scheme: https
+            tls_config:
+              ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+            bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+            relabel_configs:
+              - source_labels: [__meta_kubernetes_namespace, __meta_kubernetes_service_name, __meta_kubernetes_endpoint_port_name]
+                action: keep
+                regex: default;kubernetes;https
+          - job_name: portworx
+            scrape_interval: 30s
+            kubernetes_sd_configs:
+              - role: service
+            relabel_configs:
+              - source_labels: [__meta_kubernetes_service_name]
+                action: keep
+                regex: "(portworx-api|px-api|portworx-service|portworx)"
+    kubeletstats:
+      auth_type: serviceAccount
+      collection_interval: 30s
+      endpoint: ${env:OTEL_K8S_NODE_NAME}:10250
+      node: ${env:OTEL_K8S_NODE_NAME}
+      insecure_skip_verify: true
+      k8s_api_config:
+        auth_type: serviceAccount
+      metric_groups: [node, pod, container, volume]
+    k8s_cluster:
+      collection_interval: 60s
+      auth_type: serviceAccount
+    k8s_events: {}
+    filelog:
+      include: ["/var/log/containers/*.log"]
+      exclude: ["/var/log/containers/*opentelemetry-collector*.log"]
+      start_at: end
+
+  processors:
+    memory_limiter:
+      check_interval: 1s
+      limit_mib: 512
+      spike_limit_mib: 128
+    batch: {}
+    batch/metrics:
+      timeout: 1s
+    k8sattributes:
+      filter:
+        node_from_env_var: K8S_NODE_NAME
+      extract:
+        metadata:
+          - k8s.namespace.name
+          - k8s.pod.name
+          - k8s.deployment.name
+          - k8s.node.name
+          - k8s.container.name
+    resourcedetection/system:
+      detectors: [env, system]
+      override: false
+    resource/cluster:
+      attributes:
+        - key: k8s.cluster.name
+          value: ${env:K8S_CLUSTER_NAME}
+          action: upsert
+    filter/splunk_cardinality:
+      metrics:
+        exclude:
+          match_type: regexp
+          metric_names:
+            - ".*debug.*"
+            - ".*pprof.*"
+    filter/drop_dd_internal:
+      metrics:
+        exclude:
+          match_type: regexp
+          metric_names:
+            - "^dd\\.internal\\..*"
+
+  connectors:
+    datadog/connector: {}
+
+  exporters:
+    otlphttp/elastic:
+      endpoint: ${env:ELASTIC_OTLP_ENDPOINT}
+      headers:
+        Authorization: "ApiKey ${env:ELASTIC_API_KEY}"
+      compression: gzip
+    otlphttp/splunk:
+      metrics_endpoint: https://ingest.${env:SPLUNK_REALM}.signalfx.com/v2/datapoint/otlp
+      traces_endpoint: https://ingest.${env:SPLUNK_REALM}.signalfx.com/v2/trace/otlp
+      headers:
+        X-SF-Token: ${env:SPLUNK_ACCESS_TOKEN}
+      compression: gzip
+    datadog:
+      api:
+        key: ${env:DD_API_KEY}
+        site: ${env:DD_SITE}
+    otlphttp/vector:
+      endpoint: ${env:VECTOR_OTLP_ENDPOINT}
+      compression: gzip
+      tls:
+        insecure: true
+
+  extensions:
+    health_check:
+      endpoint: ${env:MY_POD_IP}:13133
+    pprof: {}
+
+  service:
+    extensions: [health_check, pprof]
+    pipelines:
+      traces:
+        receivers: [otlp]
+        processors: [memory_limiter, k8sattributes, resourcedetection/system, resource/cluster, batch]
+        exporters: [otlphttp/elastic, otlphttp/splunk, datadog, datadog/connector]
+      metrics/elastic:
+        receivers: [otlp, prometheus, kubeletstats, k8s_cluster]
+        processors: [memory_limiter, k8sattributes, resource/cluster, batch/metrics]
+        exporters: [otlphttp/elastic]
+      metrics/splunk:
+        receivers: [otlp, prometheus, kubeletstats, k8s_cluster]
+        processors: [memory_limiter, k8sattributes, resource/cluster, filter/splunk_cardinality, batch/metrics]
+        exporters: [otlphttp/splunk]
+      metrics/datadog:
+        receivers: [otlp, prometheus, kubeletstats, k8s_cluster, datadog/connector]
+        processors: [memory_limiter, k8sattributes, resource/cluster, filter/drop_dd_internal, batch/metrics]
+        exporters: [datadog]
+      logs:
+        receivers: [otlp, filelog, k8s_events]
+        processors: [memory_limiter, k8sattributes, resource/cluster, batch]
+        exporters: [otlphttp/elastic, datadog]

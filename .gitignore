@@ -1,0 +1,4 @@
+.env
+dist/
+*.exe
+.DS_Store
