@@ -1,0 +1,94 @@
+# STAGE: EDOT 9.5.4 replacing Splunk OTel agent + contrib gateway
+#
+# Your current layout:
+#   otel-collector-agent                  DaemonSet    splunk-otel-collector:0.126.0
+#   otel-collector-k8s-cluster-receiver   Deployment   splunk-otel-collector:0.126.0
+#   otel-collector-gateway                Deployment   opentelemetry-collector-contrib:0.126.0
+#
+# EDOT mapping (same topology):
+#   agent / daemon                        DaemonSet    elastic-otel-collector:9.5.4  -> gateway
+#   k8s-cluster-receiver                  Deployment   elastic-otel-collector:9.5.4  -> gateway
+#   gateway                               Deployment   elastic-otel-collector:9.5.4  -> Elastic + Splunk
+#
+# Image for ALL three roles (including gateway):
+#   docker.elastic.co/elastic-agent/elastic-otel-collector:9.5.4
+#
+# Note: kube-stack Helm often uses elastic-agent:9.5.4 with ELASTIC_AGENT_OTEL=true.
+# That is the same EDOT collector runtime. Prefer elastic-otel-collector if you want
+# the collector-only image Venkat asked for.
+
+# ---------------------------------------------------------------------------
+# Gateway only (answers Venkat's ask)
+# Fan-out: Elastic managed OTLP / Streams + Splunk Observability OTLP
+# Logs to Splunk still need HEC if required; this path is metrics + traces to Splunk.
+# ---------------------------------------------------------------------------
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 75
+    spike_limit_percentage: 20
+  batch:
+    send_batch_size: 1024
+    timeout: 1s
+  batch/metrics:
+    send_batch_max_size: 0
+    timeout: 1s
+
+exporters:
+  # Elastic Cloud managed OTLP -> Streams / Observability
+  otlphttp/elastic:
+    endpoint: ${env:ELASTIC_OTLP_ENDPOINT}
+    headers:
+      Authorization: ApiKey ${env:ELASTIC_API_KEY}
+    compression: gzip
+    timeout: 15s
+    retry_on_failure:
+      enabled: true
+    sending_queue:
+      enabled: true
+      queue_size: 5000
+
+  # Splunk Observability Cloud (SignalFx) OTLP ingest
+  otlphttp/splunk:
+    metrics_endpoint: https://ingest.${env:SPLUNK_REALM}.signalfx.com/v2/datapoint/otlp
+    traces_endpoint: https://ingest.${env:SPLUNK_REALM}.signalfx.com/v2/trace/otlp
+    compression: gzip
+    headers:
+      X-SF-Token: ${env:SPLUNK_ACCESS_TOKEN}
+    retry_on_failure:
+      enabled: true
+    sending_queue:
+      enabled: true
+      queue_size: 5000
+
+  debug:
+    verbosity: basic
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+service:
+  extensions: [health_check]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlphttp/elastic, otlphttp/splunk]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch/metrics]
+      exporters: [otlphttp/elastic, otlphttp/splunk]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlphttp/elastic]

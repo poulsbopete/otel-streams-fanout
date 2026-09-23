@@ -1,0 +1,131 @@
+# Helm overlay for open-telemetry/opentelemetry-kube-stack + EDOT 9.5.4
+# Maps your Splunk/contrib 3-role layout onto Elastic's kube-stack roles.
+#
+# Install (managed OTLP path + Splunk fan-out on gateway):
+#
+#   kubectl create ns opentelemetry-operator-system
+#   kubectl -n opentelemetry-operator-system create secret generic elastic-secret-otel \
+#     --from-literal=elastic_otlp_endpoint='https://YOUR.ingest....elastic.cloud:443' \
+#     --from-literal=elastic_api_key='YOUR_KEY' \
+#     --from-literal=splunk_realm='us1' \
+#     --from-literal=splunk_access_token='YOUR_TOKEN'
+#
+#   helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
+#   helm upgrade --install opentelemetry-kube-stack open-telemetry/opentelemetry-kube-stack \
+#     --namespace opentelemetry-operator-system \
+#     --values https://raw.githubusercontent.com/elastic/elastic-agent/refs/tags/v9.5.4/deploy/helm/edot-collector/kube-stack/managed_otlp/values.yaml \
+#     --values edot-kube-stack-values.yaml \
+#     --version 0.16.0
+#
+# Image answer for Venkat (gateway AND agent/cluster):
+#   docker.elastic.co/elastic-agent/elastic-otel-collector:9.5.4
+#   (or elastic-agent:9.5.4 with ELASTIC_AGENT_OTEL=true — same EDOT runtime)
+
+defaultCRConfig:
+  image:
+    repository: docker.elastic.co/elastic-agent/elastic-otel-collector
+    tag: "9.5.4"
+
+collectors:
+  # Was: otel-collector-k8s-cluster-receiver (Deployment, splunk-otel-collector)
+  cluster:
+    enabled: true
+    fullnameOverride: otel-collector-k8s-cluster-receiver
+    env:
+      - name: ELASTIC_AGENT_OTEL
+        value: "true"
+
+  # Was: otel-collector-agent (DaemonSet, splunk-otel-collector)
+  daemon:
+    enabled: true
+    fullnameOverride: otel-collector-agent
+    env:
+      - name: ELASTIC_AGENT_OTEL
+        value: "true"
+    config:
+      exporters:
+        otlp_grpc/gateway:
+          endpoint: http://otel-collector-gateway-collector:4317
+          tls:
+            insecure: true
+
+  # Was: otel-collector-gateway (Deployment, contrib)
+  # Now: EDOT gateway -> Elastic Streams + Splunk O11y
+  gateway:
+    enabled: true
+    fullnameOverride: otel-collector-gateway
+    replicas: 2
+    env:
+      - name: ELASTIC_AGENT_OTEL
+        value: "true"
+      - name: ELASTIC_OTLP_ENDPOINT
+        valueFrom:
+          secretKeyRef:
+            name: elastic-secret-otel
+            key: elastic_otlp_endpoint
+      - name: ELASTIC_API_KEY
+        valueFrom:
+          secretKeyRef:
+            name: elastic-secret-otel
+            key: elastic_api_key
+      - name: SPLUNK_REALM
+        valueFrom:
+          secretKeyRef:
+            name: elastic-secret-otel
+            key: splunk_realm
+      - name: SPLUNK_ACCESS_TOKEN
+        valueFrom:
+          secretKeyRef:
+            name: elastic-secret-otel
+            key: splunk_access_token
+    config:
+      receivers:
+        otlp:
+          protocols:
+            grpc:
+              endpoint: ${env:OTEL_K8S_POD_IP}:4317
+            http:
+              endpoint: ${env:OTEL_K8S_POD_IP}:4318
+      processors:
+        memory_limiter:
+          check_interval: 1s
+          limit_percentage: 75
+          spike_limit_percentage: 20
+        batch:
+          timeout: 1s
+        batch/metrics:
+          send_batch_max_size: 0
+          timeout: 1s
+      exporters:
+        otlphttp/elastic:
+          endpoint: ${env:ELASTIC_OTLP_ENDPOINT}
+          headers:
+            Authorization: ApiKey ${env:ELASTIC_API_KEY}
+          compression: gzip
+          timeout: 15s
+        otlphttp/splunk:
+          metrics_endpoint: https://ingest.${env:SPLUNK_REALM}.signalfx.com/v2/datapoint/otlp
+          traces_endpoint: https://ingest.${env:SPLUNK_REALM}.signalfx.com/v2/trace/otlp
+          headers:
+            X-SF-Token: ${env:SPLUNK_ACCESS_TOKEN}
+          compression: gzip
+        debug:
+          verbosity: basic
+      extensions:
+        health_check:
+          endpoint: 0.0.0.0:13133
+      service:
+        extensions: [health_check]
+        pipelines:
+          traces:
+            receivers: [otlp]
+            processors: [memory_limiter, batch]
+            exporters: [otlphttp/elastic, otlphttp/splunk]
+          metrics:
+            receivers: [otlp]
+            processors: [memory_limiter, batch/metrics]
+            exporters: [otlphttp/elastic, otlphttp/splunk]
+          logs:
+            receivers: [otlp]
+            processors: [memory_limiter, batch]
+            exporters: [otlphttp/elastic]
