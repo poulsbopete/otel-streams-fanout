@@ -166,12 +166,35 @@ docker run --rm -p 4317:4317 -p 4318:4318 --env-file .env \
 
 ---
 
+## EDOT 9.5.4 (supported path — agent / cluster / gateway)
+
+Same topology as Splunk OTel agent + contrib gateway:
+
+| Role | Deploy | Image |
+|---|---|---|
+| agent | DaemonSet | `docker.elastic.co/elastic-agent/elastic-otel-collector:9.5.4` |
+| k8s-cluster-receiver | Deployment | same |
+| gateway | Deployment | same — fans out to Elastic managed OTLP + Splunk O11y |
+
+- `edot-gateway.yaml` — gateway-only config
+- `edot-agent-and-cluster.yaml` — edge DaemonSet pattern
+- `edot-kube-stack-values.yaml` — Helm overlay for kube-stack
+
+```bash
+docker pull docker.elastic.co/elastic-agent/elastic-otel-collector:9.5.4
+```
+
+---
+
 ## Files
 
 | File | Role |
 |---|---|
 | `builder-config.yaml` | OCB manifest (what gets compiled in) |
-| `collector.yaml` | Runtime pipelines |
+| `collector.yaml` | Runtime pipelines (contrib / custom) |
 | `helm-values.yaml` | DaemonSet for contrib/custom image |
+| `edot-gateway.yaml` | Supported EDOT gateway (Elastic + Splunk) |
+| `edot-agent-and-cluster.yaml` | EDOT edge agent / cluster receiver |
+| `edot-kube-stack-values.yaml` | EDOT kube-stack Helm overlay |
 | `env.example` | Credential template |
 | `Dockerfile` | Image around `./dist/otelcol-streams-fanout` |
