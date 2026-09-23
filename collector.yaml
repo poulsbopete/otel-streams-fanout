@@ -1,6 +1,6 @@
 # Runtime config for otelcol-streams-fanout (see README.md).
 #
-# Cluster OTLP / Prometheus / K8s → Elastic + Splunk O11y.
+# Cluster OTLP / Prometheus / K8s -> Elastic + Splunk O11y.
 #
 # Required env:
 #   ELASTIC_OTLP_ENDPOINT   https://xxxx.ingest....elastic.cloud:443
@@ -213,7 +213,7 @@ service:
       processors: [memory_limiter, k8sattributes, resourcedetection/system, resource/cluster, batch]
       exporters: [otlphttp/elastic, otlphttp/splunk]
 
-    # Full-fidelity metrics → Elastic Streams (downsample / dedup / no high-card penalty on 9.5+).
+    # Full-fidelity metrics -> Elastic Streams (downsample / dedup / no high-card penalty on 9.5+).
     metrics/elastic:
       receivers: [otlp, prometheus, kubeletstats, k8s_cluster]
       processors:
@@ -233,7 +233,7 @@ service:
         [memory_limiter, k8sattributes, resourcedetection/system, resource/cluster, transform/elastic_streams, batch]
       exporters: [otlphttp/elastic]
 
-    # Optional Kafka → Elastic. Prefer Fluentd/Vector direct to Elastic if Kafka is log-only.
+    # Optional Kafka -> Elastic. Prefer Fluentd/Vector direct to Elastic if Kafka is log-only.
     # logs/kafka:
     #   receivers: [kafka]
     #   processors: [memory_limiter, resource/cluster, transform/elastic_streams, batch]

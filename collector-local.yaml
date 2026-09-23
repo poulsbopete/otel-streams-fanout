@@ -1,4 +1,4 @@
-# Laptop smoke test: OTLP in → Elastic + Splunk. No K8s scrape.
+# Laptop smoke test: OTLP in -> Elastic + Splunk. No K8s scrape.
 #   ./dist/otelcol-streams-fanout --config collector-local.yaml
 
 receivers:

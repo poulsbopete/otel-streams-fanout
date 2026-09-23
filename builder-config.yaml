@@ -1,5 +1,5 @@
 # OpenTelemetry Collector Builder manifest
-# Fan-out: cluster OTLP/Prometheus/K8s → Elastic Streams + Splunk O11y
+# Fan-out: cluster OTLP/Prometheus/K8s -> Elastic Streams + Splunk O11y
 #
 # Build steps: see README.md
 
