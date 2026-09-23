@@ -1,4 +1,4 @@
-# Laptop smoke test: OTLP in → Elastic + Splunk + Datadog. No K8s scrape.
+# Laptop smoke test: OTLP in → Elastic + Splunk. No K8s scrape.
 #   ./dist/otelcol-streams-fanout --config collector-local.yaml
 
 receivers:
@@ -17,9 +17,6 @@ processors:
   batch:
     timeout: 200ms
 
-connectors:
-  datadog/connector: {}
-
 exporters:
   otlphttp/elastic:
     endpoint: ${env:ELASTIC_OTLP_ENDPOINT}
@@ -34,11 +31,6 @@ exporters:
       X-SF-Token: ${env:SPLUNK_ACCESS_TOKEN}
     compression: gzip
 
-  datadog:
-    api:
-      key: ${env:DD_API_KEY}
-      site: ${env:DD_SITE}
-
   debug:
     verbosity: basic
 
@@ -52,7 +44,7 @@ service:
     traces:
       receivers: [otlp]
       processors: [memory_limiter, batch]
-      exporters: [otlphttp/elastic, otlphttp/splunk, datadog, datadog/connector]
+      exporters: [otlphttp/elastic, otlphttp/splunk]
     metrics/elastic:
       receivers: [otlp]
       processors: [memory_limiter, batch]
@@ -61,11 +53,7 @@ service:
       receivers: [otlp]
       processors: [memory_limiter, batch]
       exporters: [otlphttp/splunk]
-    metrics/datadog:
-      receivers: [otlp, datadog/connector]
-      processors: [memory_limiter, batch]
-      exporters: [datadog]
     logs:
       receivers: [otlp]
       processors: [memory_limiter, batch]
-      exporters: [otlphttp/elastic, datadog]
+      exporters: [otlphttp/elastic]

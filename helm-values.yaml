@@ -5,9 +5,7 @@
 #     --from-literal=elastic_otlp_endpoint='https://xxxx.ingest.elastic.cloud:443' \
 #     --from-literal=elastic_api_key='...' \
 #     --from-literal=splunk_realm='us1' \
-#     --from-literal=splunk_access_token='...' \
-#     --from-literal=dd_api_key='...' \
-#     --from-literal=dd_site='datadoghq.com'
+#     --from-literal=splunk_access_token='...'
 #
 #   helm upgrade --install otel-fanout open-telemetry/opentelemetry-collector \
 #     --values helm-values.yaml
@@ -39,22 +37,6 @@ extraEnvs:
       secretKeyRef:
         name: otel-fanout
         key: splunk_access_token
-  - name: VECTOR_OTLP_ENDPOINT
-    valueFrom:
-      secretKeyRef:
-        name: otel-fanout
-        key: vector_otlp_endpoint
-        optional: true
-  - name: DD_API_KEY
-    valueFrom:
-      secretKeyRef:
-        name: otel-fanout
-        key: dd_api_key
-  - name: DD_SITE
-    valueFrom:
-      secretKeyRef:
-        name: otel-fanout
-        key: dd_site
   - name: K8S_CLUSTER_NAME
     value: rancher-prod
   - name: OTEL_K8S_NODE_NAME
@@ -185,15 +167,6 @@ config:
           metric_names:
             - ".*debug.*"
             - ".*pprof.*"
-    filter/drop_dd_internal:
-      metrics:
-        exclude:
-          match_type: regexp
-          metric_names:
-            - "^dd\\.internal\\..*"
-
-  connectors:
-    datadog/connector: {}
 
   exporters:
     otlphttp/elastic:
@@ -207,15 +180,6 @@ config:
       headers:
         X-SF-Token: ${env:SPLUNK_ACCESS_TOKEN}
       compression: gzip
-    datadog:
-      api:
-        key: ${env:DD_API_KEY}
-        site: ${env:DD_SITE}
-    otlphttp/vector:
-      endpoint: ${env:VECTOR_OTLP_ENDPOINT}
-      compression: gzip
-      tls:
-        insecure: true
 
   extensions:
     health_check:
@@ -228,7 +192,7 @@ config:
       traces:
         receivers: [otlp]
         processors: [memory_limiter, k8sattributes, resourcedetection/system, resource/cluster, batch]
-        exporters: [otlphttp/elastic, otlphttp/splunk, datadog, datadog/connector]
+        exporters: [otlphttp/elastic, otlphttp/splunk]
       metrics/elastic:
         receivers: [otlp, prometheus, kubeletstats, k8s_cluster]
         processors: [memory_limiter, k8sattributes, resource/cluster, batch/metrics]
@@ -237,11 +201,7 @@ config:
         receivers: [otlp, prometheus, kubeletstats, k8s_cluster]
         processors: [memory_limiter, k8sattributes, resource/cluster, filter/splunk_cardinality, batch/metrics]
         exporters: [otlphttp/splunk]
-      metrics/datadog:
-        receivers: [otlp, prometheus, kubeletstats, k8s_cluster, datadog/connector]
-        processors: [memory_limiter, k8sattributes, resource/cluster, filter/drop_dd_internal, batch/metrics]
-        exporters: [datadog]
       logs:
         receivers: [otlp, filelog, k8s_events]
         processors: [memory_limiter, k8sattributes, resource/cluster, batch]
-        exporters: [otlphttp/elastic, datadog]
+        exporters: [otlphttp/elastic]

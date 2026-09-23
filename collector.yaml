@@ -1,22 +1,17 @@
 # Runtime config for otelcol-streams-fanout (see README.md).
 #
-# Cluster OTLP / Prometheus / K8s → Elastic + Splunk O11y + Datadog.
-# Optional Vector → ClickHouse (commented; original Iceberg path).
+# Cluster OTLP / Prometheus / K8s → Elastic + Splunk O11y.
 #
 # Required env:
 #   ELASTIC_OTLP_ENDPOINT   https://xxxx.ingest....elastic.cloud:443
 #   ELASTIC_API_KEY
 #   SPLUNK_REALM            us0 | us1 | eu0 | ...
 #   SPLUNK_ACCESS_TOKEN
-#   DD_API_KEY
-#   DD_SITE                 datadoghq.com | datadoghq.eu | ...
 #   K8S_CLUSTER_NAME
 # Optional:
 #   OTEL_K8S_NODE_NAME      kubeletstats (DaemonSet)
 #   MY_POD_IP               health_check bind (local: 0.0.0.0)
 #   DEPLOYMENT_ENVIRONMENT  default prod
-#   VECTOR_OTLP_ENDPOINT    enable metrics/vector + logs→vector
-#   CLICKHOUSE_ENDPOINT     enable traces/clickhouse
 #   KAFKA_BROKERS           enable logs/kafka
 
 receivers:
@@ -170,16 +165,6 @@ processors:
         statements:
           - set(attributes["elasticsearch.index"], "logs")
 
-  filter/drop_dd_internal:
-    metrics:
-      exclude:
-        match_type: regexp
-        metric_names:
-          - "^dd\\.internal\\..*"
-
-connectors:
-  datadog/connector: {}
-
 exporters:
   otlphttp/elastic:
     endpoint: ${env:ELASTIC_OTLP_ENDPOINT}
@@ -211,19 +196,6 @@ exporters:
       num_consumers: 2
       queue_size: 5000
 
-  datadog:
-    api:
-      key: ${env:DD_API_KEY}
-      site: ${env:DD_SITE}
-    traces:
-      trace_buffer: 500
-    sending_queue:
-      enabled: true
-      num_consumers: 2
-      queue_size: 5000
-    retry_on_failure:
-      enabled: true
-
   debug:
     verbosity: basic
 
@@ -239,7 +211,7 @@ service:
     traces:
       receivers: [otlp]
       processors: [memory_limiter, k8sattributes, resourcedetection/system, resource/cluster, batch]
-      exporters: [otlphttp/elastic, otlphttp/splunk, datadog, datadog/connector]
+      exporters: [otlphttp/elastic, otlphttp/splunk]
 
     # Full-fidelity metrics → Elastic Streams (downsample / dedup / no high-card penalty on 9.5+).
     metrics/elastic:
@@ -255,31 +227,14 @@ service:
         [memory_limiter, k8sattributes, resource/cluster, filter/splunk_cardinality, batch/metrics]
       exporters: [otlphttp/splunk]
 
-    # Datadog metrics + APM stats derived from traces (datadog/connector).
-    metrics/datadog:
-      receivers: [otlp, prometheus, kubeletstats, k8s_cluster, datadog/connector]
-      processors:
-        [memory_limiter, k8sattributes, resource/cluster, filter/drop_dd_internal, batch/metrics]
-      exporters: [datadog]
-
     logs:
       receivers: [otlp, filelog, k8s_events]
       processors:
         [memory_limiter, k8sattributes, resourcedetection/system, resource/cluster, transform/elastic_streams, batch]
-      exporters: [otlphttp/elastic, datadog]
-
-    # metrics/vector:
-    #   receivers: [otlp, prometheus, kubeletstats]
-    #   processors: [memory_limiter, k8sattributes, resource/cluster, batch/metrics]
-    #   exporters: [otlphttp/vector]
+      exporters: [otlphttp/elastic]
 
     # Optional Kafka → Elastic. Prefer Fluentd/Vector direct to Elastic if Kafka is log-only.
     # logs/kafka:
     #   receivers: [kafka]
     #   processors: [memory_limiter, resource/cluster, transform/elastic_streams, batch]
     #   exporters: [otlphttp/elastic]
-
-    # traces/clickhouse:
-    #   receivers: [otlp]
-    #   processors: [memory_limiter, k8sattributes, resource/cluster, batch]
-    #   exporters: [clickhouse]
