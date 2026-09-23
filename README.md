@@ -7,14 +7,9 @@ One collector. Apps speak **OTLP**. The collector fans out:
 | **Elastic Streams** (managed OTLP, 9.5+ downsample/dedup) | yes | full fidelity | yes |
 | **Splunk Observability / SignalFx** | yes | cardinality-filtered | no (use HEC if needed) |
 
-```
-Prometheus / Kubelet / Rancher API / Portworx / App OTLP
-                         │
-                   OTel Collector
-               ┌─────────┴─────────┐
-               ▼                   ▼
-        Elastic Streams      Splunk O11y
-```
+![Alternative architecture: EDOT dual-run to Splunk O11y and Elastic Observability Serverless](./architecture-serverless-elastic-splunk.png)
+
+EDOT 9.5.4 fans out to Splunk (keep existing dashboards/alerts) and **Elastic Observability Serverless** (managed OTLP + Streams) — no cluster to run. Details: [architecture-serverless.md](./architecture-serverless.md).
 
 ---
 
